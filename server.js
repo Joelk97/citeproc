@@ -1,61 +1,90 @@
 import express from "express";
-import citeproc from "citeproc";
-import crypto from "crypto";
+import { localeEnUS, normalizeCslItem } from "./locale.js";
+import CSL from "citeproc";
 
 const app = express();
 app.use(express.json({ limit: "1mb" }));
 
-app.post("/format", async (req, res) => {
+// Endpoint: /create-csl-engine-once
+// Expects body: { publicationsById, styleXml, [localeXml] }
+app.post("/create-csl-engine-once", async (req, res) => {
   try {
-    const { items, style, locale = "en-US" } = req.body;
-
-    console.log("Received POST /format");
-    console.log("Request locale:", locale);
-    if (!items || !style) {
-      console.warn("Request missing items or style");
-      return res.status(400).json({ error: "Missing items or style" });
+    const { publicationsById, styleXml, localeXml } = req.body;
+    if (!publicationsById || !styleXml) {
+      return res
+        .status(400)
+        .json({ error: "Missing publicationsById or styleXml" });
     }
 
-    // 🔐 Basic CSL sanitization (important)
-    let authorizedAuthorsCount = 0;
-    for (const id in items) {
-      const item = items[id];
-      if (Array.isArray(item.author)) {
-        const beforeCount = item.author.length;
-        item.author = item.author.filter(
-          (a) => a && (a.family || a.given || a.literal)
-        );
-        const afterCount = item.author.length;
-        authorizedAuthorsCount += afterCount;
-        if (beforeCount !== afterCount) {
-          console.log(
-            `Filtered authors for item ${id}: ${beforeCount} -> ${afterCount}`
+    // Prepare sys object per createCslEngineOnce
+    const sys = {
+      retrieveItem(id) {
+        const raw = publicationsById[id];
+        if (!raw) return null;
+        return normalizeCslItem(raw);
+      },
+      retrieveLocale(lang) {
+        if (!lang.startsWith("en")) {
+          throw new Error(
+            `This CSL file requires locale "${lang}", but only "en-US" is currently supported.`
           );
         }
-      }
-    }
-    console.log(
-      `CSL sanitization complete. Items received: ${
-        Object.keys(items).length
-      }. Authors authorized: ${authorizedAuthorsCount}`
-    );
-
-    const sys = {
-      retrieveItem: (id) => items[id],
-      retrieveLocale: () => locale,
+        return (localeXml || localeEnUS).replace(/^\uFEFF/, "");
+      },
     };
 
-    console.log("Instantiating citeproc Engine...");
-    const engine = new citeproc.Engine(sys, style);
-    engine.updateItems(Object.keys(items));
-    console.log("Items updated in citeproc Engine.");
+    // Create citeproc engine
+    const engine = new CSL.Engine(sys, styleXml, "en-US", true);
 
+    // We're not performing citation or bibliography output here;
+    // if you want to return something, e.g., a bibliography, you can extend this.
+    // For demonstration, just return an indication of success.
+    res.json({ message: "CSL Engine created successfully" });
+  } catch (err) {
+    console.error("Error in /create-csl-engine-once:", err);
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// Endpoint: /create-bibliography-engine
+// Expects body: { publications, styleXml }
+app.post("/create-bibliography-engine", async (req, res) => {
+  try {
+    const { publications, styleXml } = req.body;
+    if (!publications || !styleXml) {
+      return res
+        .status(400)
+        .json({ error: "Missing publications or styleXml" });
+    }
+
+    const sys = {
+      retrieveItem(id) {
+        const item = publications[id];
+        if (!item) {
+          console.warn("[CSL] Missing item", id);
+        }
+        return item;
+      },
+      retrieveLocale(lang) {
+        if (lang === "en-US") {
+          return localeEnUS;
+        }
+        throw new Error("Unsupported locale: " + lang);
+      },
+    };
+
+    const engine = new CSL.Engine(
+      sys,
+      styleXml.trim().replace(/^\uFEFF/, ""),
+      "en-US"
+    );
+    engine.updateItems(Object.keys(publications));
+    // Let's return the bibliography HTML output as in the original handler
     const bibliography = engine.makeBibliography();
-    console.log("Bibliography formatted successfully.");
 
     res.json({ html: bibliography[1].join("") });
   } catch (err) {
-    console.error("Error in /format handler:", err);
+    console.error("Error in /create-bibliography-engine:", err);
     res.status(500).json({ error: String(err) });
   }
 });
