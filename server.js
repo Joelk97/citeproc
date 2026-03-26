@@ -5,12 +5,40 @@ import * as cheerio from "cheerio";
 const app = express();
 app.use(express.json({ limit: "1mb" }));
 
+function logStyleDiagnostics(routeName, styleXml) {
+  const styleType = typeof styleXml;
+  const styleLen = styleType === "string" ? styleXml.length : null;
+  const hasBom = styleType === "string" ? styleXml.charCodeAt(0) === 0xfeff : false;
+  const preview =
+    styleType === "string"
+      ? styleXml.slice(0, 200).replace(/\s+/g, " ").trim()
+      : String(styleXml);
+  const styleTagMatch =
+    styleType === "string" ? styleXml.match(/<style\b[^>]*>/i) : null;
+
+  console.log(`[${routeName}] style diagnostics`, {
+    styleType,
+    styleLen,
+    hasBom,
+    styleTagPreview: styleTagMatch ? styleTagMatch[0] : null,
+    stylePreview: preview,
+  });
+}
+
 // Endpoint: /render-citations
 // Expects body: { publicationsById, styleXml, [localeXml] }
 
 app.post("/render-citations", async (req, res) => {
   try {
     const { publicationsById, styleXml, localeXml, html } = req.body;
+    console.log("[/render-citations] request metadata", {
+      publicationsCount: publicationsById ? Object.keys(publicationsById).length : 0,
+      hasLocaleXml: typeof localeXml === "string",
+      localeXmlLength: typeof localeXml === "string" ? localeXml.length : null,
+      htmlLength: typeof html === "string" ? html.length : null,
+    });
+    logStyleDiagnostics("/render-citations", styleXml);
+
     if (!publicationsById || !styleXml) {
       return res
         .status(400)
@@ -24,6 +52,7 @@ app.post("/render-citations", async (req, res) => {
         return normalizeCslItem(raw);
       },
       retrieveLocale(lang) {
+        console.log("[/render-citations] retrieveLocale called", { lang });
         if (!lang.startsWith("en")) {
           throw new Error(
             `This CSL file requires locale "${lang}", but only "en-US" is currently supported.`
@@ -33,7 +62,10 @@ app.post("/render-citations", async (req, res) => {
       },
     };
 
-    const engine = new CSL.Engine(sys, styleXml, "en-US", true);
+    const sanitizedStyleXml = styleXml.replace(/^\uFEFF/, "");
+    logStyleDiagnostics("/render-citations (sanitized)", sanitizedStyleXml);
+
+    const engine = new CSL.Engine(sys, sanitizedStyleXml, "en-US", true);
 
     const $ = cheerio.load(html, {
       decodeEntities: true,
@@ -131,6 +163,11 @@ app.post("/render-citations", async (req, res) => {
 app.post("/render-bibliography", async (req, res) => {
   try {
     const { publications, styleXml } = req.body;
+    console.log("[/render-bibliography] request metadata", {
+      publicationsCount: publications ? Object.keys(publications).length : 0,
+    });
+    logStyleDiagnostics("/render-bibliography", styleXml);
+
     if (!publications || !styleXml) {
       return res
         .status(400)
@@ -142,14 +179,18 @@ app.post("/render-bibliography", async (req, res) => {
         return publications[id] ?? null;
       },
       retrieveLocale(lang) {
+        console.log("[/render-bibliography] retrieveLocale called", { lang });
         if (lang === "en-US") return localeEnUS;
         throw new Error("Unsupported locale: " + lang);
       },
     };
 
+    const sanitizedStyleXml = styleXml.replace(/^\uFEFF/, "");
+    logStyleDiagnostics("/render-bibliography (sanitized)", sanitizedStyleXml);
+
     const engine = new CSL.Engine(
       sys,
-      styleXml.replace(/^\uFEFF/, ""),
+      sanitizedStyleXml,
       "en-US"
     );
 
